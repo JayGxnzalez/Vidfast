@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.7 (4K + Auto picker, fast resolve)");
+    console.log("VidFast module v1.0.8 (non-blocking vFast + 4K timeout)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -321,7 +321,15 @@ async function ilovearmpits(m3u8Url) {
             "X-Requested-With": "XMLHttpRequest"
         };
 
-        const response = await fetchv2(m3u8Url, headers);
+        // Cap the 4K probe so a slow vFast node can't stall the whole fetch.
+        const response = await Promise.race([
+            fetchv2(m3u8Url, headers),
+            new Promise(resolve => setTimeout(() => resolve(null), 2000))
+        ]);
+        if (!response) {
+            console.log('4K Check timed out — skipping 4K');
+            return { available: false, url: null };
+        }
         const playlistContent = await response.text();
 
         const has4K = playlistContent.includes('RESOLUTION=3840x2160');
@@ -587,10 +595,20 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
 
             console.log(`Selected server ${selectedServer.index} (${selectedServer.isMaster ? 'master' : 'media'} playlist)`);
 
+            // The vFast server is only needed for the optional 4K check. Don't block
+            // on its full timeout — race it against a short grace window so a slow/dead
+            // vFast can't add seconds to the fetch. If it isn't ready in time, we skip 4K.
             const vFastServerObj = serverList.find(server => server.name === 'vFast');
             if (vFastServerObj) {
                 const vFastIndex = serverList.indexOf(vFastServerObj);
-                vFastServer = await serverPromises[vFastIndex].catch(() => null);
+                const VFAST_GRACE_MS = 1500;
+                vFastServer = await Promise.race([
+                    serverPromises[vFastIndex].catch(() => null),
+                    new Promise(resolve => setTimeout(() => resolve(null), VFAST_GRACE_MS))
+                ]);
+                if (!vFastServer) {
+                    console.log('vFast not ready within grace window — skipping 4K check');
+                }
             } else {
                 console.log('vFast server not found in server list');
             }
