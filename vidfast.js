@@ -1,3 +1,5 @@
+//Thanks ibro for the TMDB search!
+
 async function searchResults(keyword) {
     try {
         let transformedResults = [];
@@ -181,7 +183,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.1 (live-server validation)");
+    console.log("VidFast module v1.0.2 (validate all candidates incl. mpd->m3u8)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -491,24 +493,30 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
                 throw new Error(`Server ${index} has no URL`);
             }
 
-            const format = data.url.includes('.m3u8') ? 'm3u8' : data.url.includes('.mpd') ? 'mpd' : 'unknown';
+            let format = data.url.includes('.m3u8') ? 'm3u8' : data.url.includes('.mpd') ? 'mpd' : 'unknown';
 
             const hasEnglishSubs = data.tracks && Array.isArray(data.tracks) &&
                 data.tracks.some(track => track.label && track.label.toLowerCase().includes('english') && track.file);
 
-            if (preferredFormat === 'm3u8' && format === 'm3u8') {
+            if (preferredFormat === 'm3u8') {
+                // Convert mpd to m3u8 up front so we validate the actual URL we'll return.
+                if (format === 'mpd') {
+                    data.url = data.url.replace('.mpd', '.m3u8');
+                    format = 'm3u8';
+                }
+
+                if (format !== 'm3u8') {
+                    throw new Error(`Server ${index} has unsupported format: ${format}`);
+                }
+
+                // Validate every candidate's playable URL; dead nodes throw and are
+                // skipped by Promise.any so they can never reach the picker.
                 const manifestOk = await validateManifest(data.url);
                 if (!manifestOk) {
                     throw new Error(`Server ${index} returned a dead/invalid m3u8 manifest`);
                 }
-            }
 
-            if (preferredFormat === 'm3u8' && format === 'm3u8' && hasEnglishSubs) {
-                return { index, server, success: true, format, data, preferred: true, hasSubtitles: true };
-            }
-
-            if (preferredFormat === 'm3u8' && format === 'm3u8') {
-                return { index, server, success: true, format, data, preferred: true, hasSubtitles: false };
+                return { index, server, success: true, format, data, preferred: true, hasSubtitles: hasEnglishSubs };
             }
 
             return { index, server, success: true, format, data, preferred: false, hasSubtitles: hasEnglishSubs };
