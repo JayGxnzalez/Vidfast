@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.5 (prefer master playlist + headers)");
+    console.log("VidFast module v1.0.7 (4K + Auto picker, fast resolve)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -208,15 +208,20 @@ async function extractStreamUrl(ID) {
 
         const streams = [];
 
-        if (streamResponse && streamResponse.defaultUrl) {
-            streams.push({ title: "1080p", streamUrl: streamResponse.defaultUrl, headers: streamHeaders });
-        }
-
+        // 4K option first (only when a 2160p rendition is confirmed). Single high
+        // rendition, no fallback — highest quality but less reliable pick.
         if (streamResponse && streamResponse.vFastUrl) {
             const fourKResult = await ilovearmpits(streamResponse.vFastUrl);
             if (fourKResult.available && fourKResult.url) {
                 streams.push({ title: "4K", streamUrl: fourKResult.url, headers: streamHeaders });
             }
+        }
+
+        // Main option: "Auto" when it's a master (player adapts across variants),
+        // otherwise generic "1080p" for a single-rendition media playlist.
+        if (streamResponse && streamResponse.defaultUrl) {
+            const mainLabel = streamResponse.isMaster ? "Auto" : "1080p";
+            streams.push({ title: mainLabel, streamUrl: streamResponse.defaultUrl, headers: streamHeaders });
         }
 
         const final = {
@@ -258,15 +263,20 @@ async function extractStreamUrl(ID) {
 
         const streams = [];
 
-        if (streamResponse && streamResponse.defaultUrl) {
-            streams.push({ title: "1080p", streamUrl: streamResponse.defaultUrl, headers: streamHeaders });
-        }
-
+        // 4K option first (only when a 2160p rendition is confirmed). Single high
+        // rendition, no fallback — highest quality but less reliable pick.
         if (streamResponse && streamResponse.vFastUrl) {
             const fourKResult = await ilovearmpits(streamResponse.vFastUrl);
             if (fourKResult.available && fourKResult.url) {
                 streams.push({ title: "4K", streamUrl: fourKResult.url, headers: streamHeaders });
             }
+        }
+
+        // Main option: "Auto" when it's a master (player adapts across variants),
+        // otherwise generic "1080p" for a single-rendition media playlist.
+        if (streamResponse && streamResponse.defaultUrl) {
+            const mainLabel = streamResponse.isMaster ? "Auto" : "1080p";
+            streams.push({ title: mainLabel, streamUrl: streamResponse.defaultUrl, headers: streamHeaders });
         }
 
         const final = {
@@ -525,28 +535,62 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
         const serverPromises = serverList.map((serverObj, index) => testServer(serverObj, index));
 
         if (preferredFormat === 'm3u8') {
-            // Wait for all servers to settle, then prefer a master playlist (multi-quality,
-            // lets the player negotiate a compatible codec — fixes audio-only renditions).
-            // Fall back to the first working media playlist so we never regress to no-stream.
-            const settled = await Promise.allSettled(serverPromises);
-            const working = settled
-                .filter(r => r.status === 'fulfilled' && r.value && r.value.success)
-                .map(r => r.value)
-                .sort((a, b) => a.index - b.index);
+            // Prefer a master playlist (multi-quality + codec negotiation), but don't
+            // hang on slow/dead servers. Resolve the instant a master appears; otherwise
+            // after a short window take the first working media playlist already in hand.
+            const MASTER_WAIT_MS = 2500;
 
-            if (working.length === 0) {
-                throw new Error('No working servers found');
-            }
+            selectedServer = await new Promise((resolve, reject) => {
+                let settledCount = 0;
+                let firstWorking = null;
+                let done = false;
 
-            const masterServer = working.find(s => s.isMaster);
-            selectedServer = masterServer || working[0];
-            console.log(`Selected server ${selectedServer.index} (${selectedServer.isMaster ? 'master' : 'media'} playlist)${masterServer ? '' : ' — no master available, using media fallback'}`);
+                const finish = (server) => {
+                    if (done) return;
+                    done = true;
+                    resolve(server);
+                };
+
+                const timer = setTimeout(() => {
+                    if (firstWorking) finish(firstWorking);
+                    // else: let remaining promises resolve; final settle handles it.
+                }, MASTER_WAIT_MS);
+
+                serverPromises.forEach(p => {
+                    p.then(result => {
+                        settledCount++;
+                        if (result && result.success) {
+                            if (result.isMaster) {
+                                clearTimeout(timer);
+                                finish(result);
+                                return;
+                            }
+                            if (!firstWorking || result.index < firstWorking.index) {
+                                firstWorking = result;
+                            }
+                        }
+                        if (settledCount === serverPromises.length && !done) {
+                            clearTimeout(timer);
+                            if (firstWorking) finish(firstWorking);
+                            else reject(new Error('No working servers found'));
+                        }
+                    }).catch(() => {
+                        settledCount++;
+                        if (settledCount === serverPromises.length && !done) {
+                            clearTimeout(timer);
+                            if (firstWorking) finish(firstWorking);
+                            else reject(new Error('No working servers found'));
+                        }
+                    });
+                });
+            });
+
+            console.log(`Selected server ${selectedServer.index} (${selectedServer.isMaster ? 'master' : 'media'} playlist)`);
 
             const vFastServerObj = serverList.find(server => server.name === 'vFast');
             if (vFastServerObj) {
                 const vFastIndex = serverList.indexOf(vFastServerObj);
-                const vFastSettled = settled[vFastIndex];
-                vFastServer = (vFastSettled && vFastSettled.status === 'fulfilled') ? vFastSettled.value : null;
+                vFastServer = await serverPromises[vFastIndex].catch(() => null);
             } else {
                 console.log('vFast server not found in server list');
             }
@@ -591,6 +635,7 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
         vFastUrl: vFastServer ? vFastServer.data.url : null,
         referer: baseUrl,
         format: selectedServer.format,
+        isMaster: selectedServer.isMaster === true,
         subtitles: englishSubtitles,
         fullData: selectedServer.data,
         vFastData: vFastServer ? vFastServer.data : null,
