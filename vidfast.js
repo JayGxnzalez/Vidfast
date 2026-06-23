@@ -183,6 +183,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
+    console.log("VidFast module v1.0.1 (live-server validation)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -523,74 +524,28 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
     let vFastServer = null;
 
     try {
+        const serverPromises = serverList.map((serverObj, index) => testServer(serverObj, index));
+
+        // Select the first server whose manifest is confirmed live (testServer
+        // validates the .m3u8 before resolving, so any rejected promise = dead node).
+        // Promise.any resolves with the first fulfilled promise and ignores rejections.
+        selectedServer = await Promise.any(serverPromises);
+        console.log(`Selected first live server ${selectedServer.index} with format ${selectedServer.format}${selectedServer.hasSubtitles ? ' (has subtitles)' : ''}`);
+
         if (preferredFormat === 'm3u8') {
-            const serverPromises = serverList.map((serverObj, index) => testServer(serverObj, index));
-
-            const raceForSubtitles = new Promise((resolve, reject) => {
-                let completedCount = 0;
-                let firstWorkingServer = null;
-
-                serverPromises.forEach(promise => {
-                    promise.then(result => {
-                        completedCount++;
-
-                        if (result.hasSubtitles) {
-                            console.log(`Found server ${result.index} with subtitles, stopping other requests`);
-                            resolve(result);
-                            return;
-                        }
-
-                        if (!firstWorkingServer && result.format === 'm3u8') {
-                            firstWorkingServer = result;
-                        }
-
-                        if (completedCount === serverPromises.length) {
-                            if (firstWorkingServer) {
-                                console.log(`No servers with subtitles found, using fallback server ${firstWorkingServer.index}`);
-                                resolve(firstWorkingServer);
-                            } else {
-                                reject(new Error('No working m3u8 servers found'));
-                            }
-                        }
-                    }).catch(() => {
-                        completedCount++;
-
-                        if (completedCount === serverPromises.length) {
-                            if (firstWorkingServer) {
-                                console.log(`No servers with subtitles found, using fallback server ${firstWorkingServer.index}`);
-                                resolve(firstWorkingServer);
-                            } else {
-                                reject(new Error('No working m3u8 servers found'));
-                            }
-                        }
-                    });
-                });
-            });
-
-            let vFastPromise = Promise.resolve(null);
             const vFastServerObj = serverList.find(server => server.name === 'vFast');
             if (vFastServerObj) {
                 const vFastIndex = serverList.indexOf(vFastServerObj);
-                vFastPromise = serverPromises[vFastIndex].catch(error => {
+                vFastServer = await serverPromises[vFastIndex].catch(error => {
                     console.log('vFast server failed: ' + error.message);
                     return null;
                 });
             } else {
                 console.log('vFast server not found in server list');
             }
-
-            const [selected, vFastResult] = await Promise.all([raceForSubtitles, vFastPromise]);
-            selectedServer = selected;
-            vFastServer = vFastResult;
-
-        } else {
-            const serverPromises = serverList.map((serverObj, index) => testServer(serverObj, index));
-            selectedServer = await Promise.any(serverPromises);
-
-            console.log(`Found working server ${selectedServer.index} with format ${selectedServer.format}`);
         }
     } catch (error) {
-        console.log('All servers failed:' + error);
+        console.log('All servers failed: ' + error);
         throw new Error('No working servers found');
     }
 
@@ -639,3 +594,137 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
     };
 }
 
+async function getValidatedStreams(imdbId, isSeries, season, episode) {
+    var baseUrl;
+    if (isSeries) {
+        baseUrl = `https://vidfast.pro/tv/${imdbId}/${season}/${episode}`;
+    } else {
+        baseUrl = `https://vidfast.pro/movie/${imdbId}`;
+    }
+
+    var headers = {
+        "Accept": "*/*",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
+        "Referer": baseUrl,
+        "X-Requested-With": "XMLHttpRequest"
+    };
+
+    console.log(`Requesting Base URL: ${baseUrl}`);
+    var pageResponse = await fetchv2(baseUrl, headers);
+    var pageText = await pageResponse.text();
+
+    var match = pageText.match(/\\"en\\":\\"([^"]+)\\"/) ||
+        pageText.match(/"en":"([^"]+)"/) ||
+        pageText.match(/'en':'([^']+)'/) ||
+        pageText.match(/["']en["']:\s*["']([^"']+)["']/);
+
+    if (!match) {
+        throw new Error('Could not find data in page');
+    }
+    var rawData = match[1];
+
+    var apiUrl = `https://enc-dec.app/api/enc-vidfast?text=${encodeURIComponent(rawData)}&version=1`;
+    var apiResponse = await soraFetch(apiUrl);
+    var apiData = await apiResponse.json();
+
+    if (apiData.status !== 200 || !apiData.result) {
+        throw new Error('Failed to decrypt data via enc-dec.app API');
+    }
+
+    var apiServers = apiData.result.servers;
+    var streamBase = apiData.result.stream;
+    var csrfToken = apiData.result.token;
+
+    if (csrfToken) {
+        headers["X-CSRF-Token"] = csrfToken;
+    }
+
+    var serversResponse = await soraFetch(apiServers, { method: 'POST', headers: headers });
+    var serversEncrypted = await serversResponse.text();
+
+    var decServersResponse = await soraFetch('https://enc-dec.app/api/dec-vidfast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: serversEncrypted, version: "1" })
+    });
+    var decServersData = await decServersResponse.json();
+
+    if (decServersData.status !== 200 || !decServersData.result) {
+        throw new Error('Failed to decrypt servers data via enc-dec.app API');
+    }
+    var serverList = decServersData.result;
+
+    if (!serverList || serverList.length === 0) {
+        throw new Error('No servers available');
+    }
+
+    var resolveServer = async (serverObj, index) => {
+        var server = serverObj.data;
+        var apiStream = streamBase + '/' + server;
+        try {
+            var streamResponse = await soraFetch(apiStream, { method: 'POST', headers: headers });
+            var streamEncrypted = await streamResponse.text();
+
+            var decStreamResponse = await soraFetch('https://enc-dec.app/api/dec-vidfast', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: streamEncrypted, version: "1" })
+            });
+            var decStreamData = await decStreamResponse.json();
+
+            if (decStreamData.status !== 200 || !decStreamData.result) {
+                return null;
+            }
+
+            var data = decStreamData.result;
+            if (!data.url) {
+                return null;
+            }
+
+            var url = data.url;
+            if (url.includes('.mpd')) {
+                url = url.replace('.mpd', '.m3u8');
+            }
+            if (!url.includes('.m3u8')) {
+                return null;
+            }
+
+            var ok = await validateManifest(url);
+            if (!ok) {
+                console.log(`Server ${index} (${serverObj.name || 'unknown'}) failed validation, skipping`);
+                return null;
+            }
+
+            console.log(`Server ${index} (${serverObj.name || 'unknown'}) validated OK`);
+
+            var subtitle = null;
+            if (data.tracks && Array.isArray(data.tracks)) {
+                var engTrack = data.tracks.find(track =>
+                    track.label && track.label.toLowerCase().includes('english') && track.file
+                );
+                if (engTrack) {
+                    subtitle = engTrack.file;
+                }
+            }
+
+            return {
+                index: index,
+                name: serverObj.name || ('Server ' + (index + 1)),
+                url: url,
+                subtitle: subtitle
+            };
+        } catch (error) {
+            console.log(`Server ${index} error: ${error.message}`);
+            return null;
+        }
+    };
+
+    var results = await Promise.all(serverList.map((s, i) => resolveServer(s, i)));
+    var working = results.filter(r => r !== null);
+
+    if (working.length === 0) {
+        throw new Error('No working validated servers found');
+    }
+
+    return { servers: working, referer: baseUrl };
+}
