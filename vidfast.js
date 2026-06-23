@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.4 (object stream format + headers)");
+    console.log("VidFast module v1.0.5 (prefer master playlist + headers)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -483,10 +483,35 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
                     throw new Error(`Server ${index} has unsupported format: ${format}`);
                 }
 
-                return { index, server, success: true, format, data, preferred: true, hasSubtitles: hasEnglishSubs };
+                // Classify the playlist: a master lists multiple variants
+                // (#EXT-X-STREAM-INF) and lets the player negotiate a compatible
+                // codec/bitrate; a media playlist is a single locked rendition.
+                let isMaster = false;
+                try {
+                    const plResp = await soraFetch(data.url, {
+                        method: 'GET',
+                        headers: {
+                            "Referer": "https://vidfast.pro/",
+                            "Origin": "https://vidfast.pro",
+                            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+                        }
+                    });
+                    if (plResp && typeof plResp.text === 'function') {
+                        const plBody = await plResp.text();
+                        if (plBody && plBody.indexOf('#EXT-X-STREAM-INF') !== -1) {
+                            isMaster = true;
+                        }
+                    }
+                } catch (e) {
+                    // If we can't read it, treat as non-master; selection still works.
+                    console.log(`Server ${index} playlist classify failed: ${e}`);
+                }
+
+                console.log(`Server ${index} ready: ${isMaster ? 'master' : 'media'} playlist`);
+                return { index, server, success: true, format, data, preferred: true, hasSubtitles: hasEnglishSubs, isMaster };
             }
 
-            return { index, server, success: true, format, data, preferred: false, hasSubtitles: hasEnglishSubs };
+            return { index, server, success: true, format, data, preferred: false, hasSubtitles: hasEnglishSubs, isMaster: false };
 
         } catch (error) {
             throw new Error(`Server ${index} failed: ${error.message}`);
@@ -499,23 +524,35 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
     try {
         const serverPromises = serverList.map((serverObj, index) => testServer(serverObj, index));
 
-        // Select the first server whose manifest is confirmed live (testServer
-        // validates the .m3u8 before resolving, so any rejected promise = dead node).
-        // Promise.any resolves with the first fulfilled promise and ignores rejections.
-        selectedServer = await Promise.any(serverPromises);
-        console.log(`Selected first live server ${selectedServer.index} with format ${selectedServer.format}${selectedServer.hasSubtitles ? ' (has subtitles)' : ''}`);
-
         if (preferredFormat === 'm3u8') {
+            // Wait for all servers to settle, then prefer a master playlist (multi-quality,
+            // lets the player negotiate a compatible codec — fixes audio-only renditions).
+            // Fall back to the first working media playlist so we never regress to no-stream.
+            const settled = await Promise.allSettled(serverPromises);
+            const working = settled
+                .filter(r => r.status === 'fulfilled' && r.value && r.value.success)
+                .map(r => r.value)
+                .sort((a, b) => a.index - b.index);
+
+            if (working.length === 0) {
+                throw new Error('No working servers found');
+            }
+
+            const masterServer = working.find(s => s.isMaster);
+            selectedServer = masterServer || working[0];
+            console.log(`Selected server ${selectedServer.index} (${selectedServer.isMaster ? 'master' : 'media'} playlist)${masterServer ? '' : ' — no master available, using media fallback'}`);
+
             const vFastServerObj = serverList.find(server => server.name === 'vFast');
             if (vFastServerObj) {
                 const vFastIndex = serverList.indexOf(vFastServerObj);
-                vFastServer = await serverPromises[vFastIndex].catch(error => {
-                    console.log('vFast server failed: ' + error.message);
-                    return null;
-                });
+                const vFastSettled = settled[vFastIndex];
+                vFastServer = (vFastSettled && vFastSettled.status === 'fulfilled') ? vFastSettled.value : null;
             } else {
                 console.log('vFast server not found in server list');
             }
+        } else {
+            selectedServer = await Promise.any(serverPromises);
+            console.log(`Selected first live server ${selectedServer.index} with format ${selectedServer.format}`);
         }
     } catch (error) {
         console.log('All servers failed: ' + error);
