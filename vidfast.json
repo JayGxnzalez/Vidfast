@@ -9,11 +9,11 @@
   "version": "1.0.0",
   "language": "English",
   "streamType": "HLS",
-  "quality": "4K",
+  "quality": "1080, 4K",
   "baseUrl": "https://vidfast.pro/",
   "searchBaseUrl": "https://vidfast.pro/",
   "scriptUrl": "https://raw.githubusercontent.com/JayGxnzalez/Vidfast/refs/heads/main/vidfast.js",
-  "type": "movie",
+  "type": "Movie/TV Show",
   "downloadSupport": true,
   "asyncJS": true,
   "softsub": true
