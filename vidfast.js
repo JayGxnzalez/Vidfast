@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.2 (validate all candidates incl. mpd->m3u8)");
+    console.log("VidFast module v1.0.3 (mpd->m3u8, no validation)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -287,41 +287,6 @@ async function soraFetch(url, options = { headers: {}, method: 'GET', body: null
         } catch (error) {
             return null;
         }
-    }
-}
-
-async function validateManifest(url) {
-    try {
-        var headers = {
-            "Accept": "*/*",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-            "Referer": "https://vidfast.pro/",
-            "Origin": "https://vidfast.pro",
-            "X-Requested-With": "XMLHttpRequest"
-        };
-
-        var response = await soraFetch(url, { method: 'GET', headers: headers });
-        if (!response) {
-            console.log('Manifest validation: no response for ' + url);
-            return false;
-        }
-
-        var status = response.status || 0;
-        if (status && (status < 200 || status >= 400)) {
-            console.log('Manifest validation: bad status ' + status + ' for ' + url);
-            return false;
-        }
-
-        var body = await response.text();
-        if (!body || body.indexOf('#EXTM3U') === -1) {
-            console.log('Manifest validation: not a valid playlist for ' + url);
-            return false;
-        }
-
-        return true;
-    } catch (error) {
-        console.log('Manifest validation error for ' + url + ': ' + error);
-        return false;
     }
 }
 
@@ -497,7 +462,6 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
                 data.tracks.some(track => track.label && track.label.toLowerCase().includes('english') && track.file);
 
             if (preferredFormat === 'm3u8') {
-                // Convert mpd to m3u8 up front so we validate the actual URL we'll return.
                 if (format === 'mpd') {
                     data.url = data.url.replace('.mpd', '.m3u8');
                     format = 'm3u8';
@@ -505,13 +469,6 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
 
                 if (format !== 'm3u8') {
                     throw new Error(`Server ${index} has unsupported format: ${format}`);
-                }
-
-                // Validate every candidate's playable URL; dead nodes throw and are
-                // skipped by Promise.any so they can never reach the picker.
-                const manifestOk = await validateManifest(data.url);
-                if (!manifestOk) {
-                    throw new Error(`Server ${index} returned a dead/invalid m3u8 manifest`);
                 }
 
                 return { index, server, success: true, format, data, preferred: true, hasSubtitles: hasEnglishSubs };
@@ -598,137 +555,3 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
     };
 }
 
-async function getValidatedStreams(imdbId, isSeries, season, episode) {
-    var baseUrl;
-    if (isSeries) {
-        baseUrl = `https://vidfast.pro/tv/${imdbId}/${season}/${episode}`;
-    } else {
-        baseUrl = `https://vidfast.pro/movie/${imdbId}`;
-    }
-
-    var headers = {
-        "Accept": "*/*",
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-        "Referer": baseUrl,
-        "X-Requested-With": "XMLHttpRequest"
-    };
-
-    console.log(`Requesting Base URL: ${baseUrl}`);
-    var pageResponse = await fetchv2(baseUrl, headers);
-    var pageText = await pageResponse.text();
-
-    var match = pageText.match(/\\"en\\":\\"([^"]+)\\"/) ||
-        pageText.match(/"en":"([^"]+)"/) ||
-        pageText.match(/'en':'([^']+)'/) ||
-        pageText.match(/["']en["']:\s*["']([^"']+)["']/);
-
-    if (!match) {
-        throw new Error('Could not find data in page');
-    }
-    var rawData = match[1];
-
-    var apiUrl = `https://enc-dec.app/api/enc-vidfast?text=${encodeURIComponent(rawData)}&version=1`;
-    var apiResponse = await soraFetch(apiUrl);
-    var apiData = await apiResponse.json();
-
-    if (apiData.status !== 200 || !apiData.result) {
-        throw new Error('Failed to decrypt data via enc-dec.app API');
-    }
-
-    var apiServers = apiData.result.servers;
-    var streamBase = apiData.result.stream;
-    var csrfToken = apiData.result.token;
-
-    if (csrfToken) {
-        headers["X-CSRF-Token"] = csrfToken;
-    }
-
-    var serversResponse = await soraFetch(apiServers, { method: 'POST', headers: headers });
-    var serversEncrypted = await serversResponse.text();
-
-    var decServersResponse = await soraFetch('https://enc-dec.app/api/dec-vidfast', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: serversEncrypted, version: "1" })
-    });
-    var decServersData = await decServersResponse.json();
-
-    if (decServersData.status !== 200 || !decServersData.result) {
-        throw new Error('Failed to decrypt servers data via enc-dec.app API');
-    }
-    var serverList = decServersData.result;
-
-    if (!serverList || serverList.length === 0) {
-        throw new Error('No servers available');
-    }
-
-    var resolveServer = async (serverObj, index) => {
-        var server = serverObj.data;
-        var apiStream = streamBase + '/' + server;
-        try {
-            var streamResponse = await soraFetch(apiStream, { method: 'POST', headers: headers });
-            var streamEncrypted = await streamResponse.text();
-
-            var decStreamResponse = await soraFetch('https://enc-dec.app/api/dec-vidfast', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: streamEncrypted, version: "1" })
-            });
-            var decStreamData = await decStreamResponse.json();
-
-            if (decStreamData.status !== 200 || !decStreamData.result) {
-                return null;
-            }
-
-            var data = decStreamData.result;
-            if (!data.url) {
-                return null;
-            }
-
-            var url = data.url;
-            if (url.includes('.mpd')) {
-                url = url.replace('.mpd', '.m3u8');
-            }
-            if (!url.includes('.m3u8')) {
-                return null;
-            }
-
-            var ok = await validateManifest(url);
-            if (!ok) {
-                console.log(`Server ${index} (${serverObj.name || 'unknown'}) failed validation, skipping`);
-                return null;
-            }
-
-            console.log(`Server ${index} (${serverObj.name || 'unknown'}) validated OK`);
-
-            var subtitle = null;
-            if (data.tracks && Array.isArray(data.tracks)) {
-                var engTrack = data.tracks.find(track =>
-                    track.label && track.label.toLowerCase().includes('english') && track.file
-                );
-                if (engTrack) {
-                    subtitle = engTrack.file;
-                }
-            }
-
-            return {
-                index: index,
-                name: serverObj.name || ('Server ' + (index + 1)),
-                url: url,
-                subtitle: subtitle
-            };
-        } catch (error) {
-            console.log(`Server ${index} error: ${error.message}`);
-            return null;
-        }
-    };
-
-    var results = await Promise.all(serverList.map((s, i) => resolveServer(s, i)));
-    var working = results.filter(r => r !== null);
-
-    if (working.length === 0) {
-        throw new Error('No working validated servers found');
-    }
-
-    return { servers: working, referer: baseUrl };
-}
