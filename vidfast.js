@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.3 (mpd->m3u8, no validation)");
+    console.log("VidFast module v1.0.4 (object stream format + headers)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -200,22 +200,28 @@ async function extractStreamUrl(ID) {
 
         const streamResponse = await ilovefeet(imdbID, false, null, null, 'm3u8');
 
+        const streamHeaders = {
+            "Referer": "https://vidfast.pro/",
+            "Origin": "https://vidfast.pro",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+        };
+
         const streams = [];
 
         if (streamResponse && streamResponse.defaultUrl) {
-            streams.push("1080p", streamResponse.defaultUrl);
+            streams.push({ title: "1080p", streamUrl: streamResponse.defaultUrl, headers: streamHeaders });
         }
 
         if (streamResponse && streamResponse.vFastUrl) {
             const fourKResult = await ilovearmpits(streamResponse.vFastUrl);
             if (fourKResult.available && fourKResult.url) {
-                streams.push("4K", fourKResult.url);
+                streams.push({ title: "4K", streamUrl: fourKResult.url, headers: streamHeaders });
             }
         }
 
         const final = {
-            streams,
-            subtitle: streamResponse.subtitles || "None"
+            streams: streams,
+            subtitles: streamResponse.subtitles || ""
         };
 
         const endTime = Date.now();
@@ -244,22 +250,28 @@ async function extractStreamUrl(ID) {
 
         const streamResponse = await ilovefeet(imdbID, true, seasonNumber, episodeNumber, 'm3u8');
 
+        const streamHeaders = {
+            "Referer": "https://vidfast.pro/",
+            "Origin": "https://vidfast.pro",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+        };
+
         const streams = [];
 
         if (streamResponse && streamResponse.defaultUrl) {
-            streams.push("1080p", streamResponse.defaultUrl);
+            streams.push({ title: "1080p", streamUrl: streamResponse.defaultUrl, headers: streamHeaders });
         }
 
         if (streamResponse && streamResponse.vFastUrl) {
             const fourKResult = await ilovearmpits(streamResponse.vFastUrl);
             if (fourKResult.available && fourKResult.url) {
-                streams.push("4K", fourKResult.url);
+                streams.push({ title: "4K", streamUrl: fourKResult.url, headers: streamHeaders });
             }
         }
 
         const final = {
-            streams,
-            subtitle: streamResponse.subtitles || "None"
+            streams: streams,
+            subtitles: streamResponse.subtitles || ""
         };
 
         const endTime = Date.now();
