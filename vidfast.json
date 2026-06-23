@@ -13,7 +13,7 @@
   "baseUrl": "https://vidfast.pro/",
   "searchBaseUrl": "https://vidfast.pro/",
   "scriptUrl": "https://raw.githubusercontent.com/JayGxnzalez/Vidfast/refs/heads/main/vidfast.js",
-  "type": "Movie/TV Show",
+  "type": "Movie/TV",
   "downloadSupport": true,
   "asyncJS": true,
   "softsub": true
