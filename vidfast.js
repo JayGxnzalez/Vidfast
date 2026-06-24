@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.8 (non-blocking vFast + 4K timeout)");
+    console.log("VidFast module v1.0.9 (cross-engine: no setTimeout)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -321,13 +321,9 @@ async function ilovearmpits(m3u8Url) {
             "X-Requested-With": "XMLHttpRequest"
         };
 
-        // Cap the 4K probe so a slow vFast node can't stall the whole fetch.
-        const response = await Promise.race([
-            fetchv2(m3u8Url, headers),
-            new Promise(resolve => setTimeout(() => resolve(null), 2000))
-        ]);
+        const response = await fetchv2(m3u8Url, headers);
         if (!response) {
-            console.log('4K Check timed out — skipping 4K');
+            console.log('4K Check: no response — skipping 4K');
             return { available: false, url: null };
         }
         const playlistContent = await response.text();
@@ -545,9 +541,10 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
         if (preferredFormat === 'm3u8') {
             // Prefer a master playlist (multi-quality + codec negotiation), but don't
             // hang on slow/dead servers. Resolve the instant a master appears; otherwise
-            // after a short window take the first working media playlist already in hand.
-            const MASTER_WAIT_MS = 2500;
-
+            // Prefer a master playlist (multi-quality + codec negotiation). Resolve the
+            // instant a master appears; otherwise once all servers settle, take the first
+            // working media playlist. Timer-free so it works across all JS engines
+            // (Sora/Luna's engines don't provide setTimeout).
             selectedServer = await new Promise((resolve, reject) => {
                 let settledCount = 0;
                 let firstWorking = null;
@@ -559,17 +556,11 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
                     resolve(server);
                 };
 
-                const timer = setTimeout(() => {
-                    if (firstWorking) finish(firstWorking);
-                    // else: let remaining promises resolve; final settle handles it.
-                }, MASTER_WAIT_MS);
-
                 serverPromises.forEach(p => {
                     p.then(result => {
                         settledCount++;
                         if (result && result.success) {
                             if (result.isMaster) {
-                                clearTimeout(timer);
                                 finish(result);
                                 return;
                             }
@@ -578,14 +569,12 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
                             }
                         }
                         if (settledCount === serverPromises.length && !done) {
-                            clearTimeout(timer);
                             if (firstWorking) finish(firstWorking);
                             else reject(new Error('No working servers found'));
                         }
                     }).catch(() => {
                         settledCount++;
                         if (settledCount === serverPromises.length && !done) {
-                            clearTimeout(timer);
                             if (firstWorking) finish(firstWorking);
                             else reject(new Error('No working servers found'));
                         }
@@ -595,19 +584,14 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
 
             console.log(`Selected server ${selectedServer.index} (${selectedServer.isMaster ? 'master' : 'media'} playlist)`);
 
-            // The vFast server is only needed for the optional 4K check. Don't block
-            // on its full timeout — race it against a short grace window so a slow/dead
-            // vFast can't add seconds to the fetch. If it isn't ready in time, we skip 4K.
+            // The vFast server is only needed for the optional 4K check. It's already
+            // in flight with the others; await it (no extra fetch). No timer needed.
             const vFastServerObj = serverList.find(server => server.name === 'vFast');
             if (vFastServerObj) {
                 const vFastIndex = serverList.indexOf(vFastServerObj);
-                const VFAST_GRACE_MS = 1500;
-                vFastServer = await Promise.race([
-                    serverPromises[vFastIndex].catch(() => null),
-                    new Promise(resolve => setTimeout(() => resolve(null), VFAST_GRACE_MS))
-                ]);
+                vFastServer = await serverPromises[vFastIndex].catch(() => null);
                 if (!vFastServer) {
-                    console.log('vFast not ready within grace window — skipping 4K check');
+                    console.log('vFast not available — skipping 4K check');
                 }
             } else {
                 console.log('vFast server not found in server list');
