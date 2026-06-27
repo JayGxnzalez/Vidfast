@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.0.9 (cross-engine: no setTimeout)");
+    console.log("VidFast module v1.1.0 (Vidfast + Videasy 4K)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -208,13 +208,9 @@ async function extractStreamUrl(ID) {
 
         const streams = [];
 
-        // 4K option first (only when a 2160p rendition is confirmed). Single high
-        // rendition, no fallback — highest quality but less reliable pick.
-        if (streamResponse && streamResponse.vFastUrl) {
-            const fourKResult = await ilovearmpits(streamResponse.vFastUrl);
-            if (fourKResult.available && fourKResult.url) {
-                streams.push({ title: "4K", streamUrl: fourKResult.url, headers: streamHeaders });
-            }
+        const videasy4K = await getVideasy4K(tmdbData.title || tmdbData.name || "", (tmdbData.release_date ? new Date(tmdbData.release_date).getFullYear() : ""), tmdbID, imdbID, "movie", null, null).catch(e => { console.log('Videasy 4K failed: ' + e); return null; });
+        if (videasy4K && videasy4K.url) {
+            streams.push({ title: "4K", streamUrl: videasy4K.url, headers: videasy4K.headers });
         }
 
         // Main option: "Auto" when it's a master (player adapts across variants),
@@ -263,13 +259,9 @@ async function extractStreamUrl(ID) {
 
         const streams = [];
 
-        // 4K option first (only when a 2160p rendition is confirmed). Single high
-        // rendition, no fallback — highest quality but less reliable pick.
-        if (streamResponse && streamResponse.vFastUrl) {
-            const fourKResult = await ilovearmpits(streamResponse.vFastUrl);
-            if (fourKResult.available && fourKResult.url) {
-                streams.push({ title: "4K", streamUrl: fourKResult.url, headers: streamHeaders });
-            }
+        const videasy4K = await getVideasy4K(tmdbData.name || tmdbData.title || "", (tmdbData.first_air_date ? new Date(tmdbData.first_air_date).getFullYear() : ""), tmdbID, imdbID, "tv", seasonNumber, episodeNumber).catch(e => { console.log('Videasy 4K failed: ' + e); return null; });
+        if (videasy4K && videasy4K.url) {
+            streams.push({ title: "4K", streamUrl: videasy4K.url, headers: videasy4K.headers });
         }
 
         // Main option: "Auto" when it's a master (player adapts across variants),
@@ -312,79 +304,83 @@ async function soraFetch(url, options = { headers: {}, method: 'GET', body: null
     }
 }
 
-async function ilovearmpits(m3u8Url) {
-    try {
-        const headers = {
-            "Accept": "*/*",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-            "Referer": "https://vidfast.pro/",
-            "X-Requested-With": "XMLHttpRequest"
-        };
+async function getVideasy4K(title, year, tmdbId, imdbId, mediaType, seasonNumber, episodeNumber) {
+    const encodedTitle = encodeURIComponent(title || "");
+    const season = seasonNumber || "1";
+    const episode = episodeNumber || "1";
 
-        const response = await fetchv2(m3u8Url, headers);
-        if (!response) {
-            console.log('4K Check: no response — skipping 4K');
-            return { available: false, url: null };
+    // tejo first so its master playlist wins when both return 4K.
+    const servers = [
+        { name: "Tejo", endpoint: "tejo" },
+        { name: "Yoru", endpoint: "cdn" }
+    ];
+
+    const fetchOpts = {
+        headers: {
+            "Referer": "https://player.videasy.to/",
+            "Origin": "https://player.videasy.to",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
-        const playlistContent = await response.text();
+    };
 
-        const has4K = playlistContent.includes('RESOLUTION=3840x2160');
+    const streamHeaders = {
+        "Origin": "https://player.videasy.to",
+        "Referer": "https://player.videasy.to/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    };
 
-        if (!has4K) {
-            console.log(`4K Check for ${m3u8Url}: NO`);
-            return { available: false, url: null };
-        }
+    const probe = async (server) => {
+        try {
+            const fullUrl = `https://api.videasy.to/${server.endpoint}/sources-with-title?title=${encodedTitle}&mediaType=${mediaType}&year=${year}&episodeId=${episode}&seasonId=${season}&tmdbId=${tmdbId}&imdbId=${imdbId}`;
+            const resp = await soraFetch(fullUrl, fetchOpts);
+            if (!resp) return null;
 
-        const lines = playlistContent.split('\n');
-        let fourKPath = null;
-        let fourKCount = 0;
+            const encrypted = await resp.text();
+            if (!encrypted || encrypted.includes("Attention Required") || encrypted.includes("Cloudflare")) return null;
 
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes('RESOLUTION=3840x2160')) {
-                fourKCount++;
-                if (fourKCount === 2 && i + 1 < lines.length) {
-                    fourKPath = lines[i + 1].trim();
-                    break;
-                }
+            const decResp = await soraFetch("https://enc-dec.app/api/dec-videasy", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify({ text: encrypted.trim(), id: String(tmdbId) })
+            });
+            if (!decResp) return null;
+
+            let decData = null;
+            try {
+                const decText = await decResp.text();
+                decData = JSON.parse(decText);
+            } catch (e) {
+                console.log(`Videasy ${server.name}: decrypt parse failed: ${e}`);
+                return null;
             }
-        }
 
-        if (!fourKPath && fourKCount === 1) {
-            for (let i = 0; i < lines.length; i++) {
-                if (lines[i].includes('RESOLUTION=3840x2160')) {
-                    if (i + 1 < lines.length) {
-                        fourKPath = lines[i + 1].trim();
-                        break;
-                    }
-                }
+            if (!decData || decData.status !== 200 || !decData.result) return null;
+
+            const sources = decData.result.sources || [];
+            const fourK = sources.find(s => {
+                const q = (s.quality || "").toString().toLowerCase();
+                return q.includes("2160") || q.includes("4k");
+            });
+
+            if (fourK && fourK.url) {
+                console.log(`Videasy ${server.name}: 4K found`);
+                return { url: fourK.url, headers: streamHeaders, server: server.name };
             }
+            return null;
+        } catch (err) {
+            console.log(`Videasy ${server.name} error: ${err}`);
+            return null;
         }
+    };
 
-        if (!fourKPath) {
-            console.log('4K resolution found but could not extract path');
-            return { available: false, url: null };
-        }
-
-        let baseUrl = '';
-        if (m3u8Url.startsWith('https://')) {
-            const afterProtocol = m3u8Url.substring(8);
-            const hostEnd = afterProtocol.indexOf('/');
-            const host = hostEnd !== -1 ? afterProtocol.substring(0, hostEnd) : afterProtocol;
-            baseUrl = 'https://' + host;
-        } else if (m3u8Url.startsWith('http://')) {
-            const afterProtocol = m3u8Url.substring(7);
-            const hostEnd = afterProtocol.indexOf('/');
-            const host = hostEnd !== -1 ? afterProtocol.substring(0, hostEnd) : afterProtocol;
-            baseUrl = 'http://' + host;
-        }
-
-        const full4KUrl = fourKPath.startsWith('http') ? fourKPath : `${baseUrl}${fourKPath}`;
-
-        return { available: true, url: full4KUrl };
-    } catch (error) {
-        console.log('Error checking 4K availability: ' + error);
-        return { available: false, url: null };
+    const results = await Promise.all(servers.map(s => probe(s)));
+    const chosen = results[0] || results[1];
+    if (chosen) {
+        console.log(`Videasy 4K selected from ${chosen.server}`);
+        return chosen;
     }
+    console.log('Videasy: no 4K available');
+    return null;
 }
 
 async function ilovefeet(imdbId, isSeries = false, season = null, episode = null, preferredFormat = null) {
@@ -533,14 +529,11 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
     };
 
     let selectedServer = null;
-    let vFastServer = null;
 
     try {
         const serverPromises = serverList.map((serverObj, index) => testServer(serverObj, index));
 
         if (preferredFormat === 'm3u8') {
-            // Prefer a master playlist (multi-quality + codec negotiation), but don't
-            // hang on slow/dead servers. Resolve the instant a master appears; otherwise
             // Prefer a master playlist (multi-quality + codec negotiation). Resolve the
             // instant a master appears; otherwise once all servers settle, take the first
             // working media playlist. Timer-free so it works across all JS engines
@@ -583,19 +576,6 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
             });
 
             console.log(`Selected server ${selectedServer.index} (${selectedServer.isMaster ? 'master' : 'media'} playlist)`);
-
-            // The vFast server is only needed for the optional 4K check. It's already
-            // in flight with the others; await it (no extra fetch). No timer needed.
-            const vFastServerObj = serverList.find(server => server.name === 'vFast');
-            if (vFastServerObj) {
-                const vFastIndex = serverList.indexOf(vFastServerObj);
-                vFastServer = await serverPromises[vFastIndex].catch(() => null);
-                if (!vFastServer) {
-                    console.log('vFast not available — skipping 4K check');
-                }
-            } else {
-                console.log('vFast server not found in server list');
-            }
         } else {
             selectedServer = await Promise.any(serverPromises);
             console.log(`Selected first live server ${selectedServer.index} with format ${selectedServer.format}`);
@@ -605,14 +585,10 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
         throw new Error('No working servers found');
     }
 
-    const workingServers = [selectedServer];
-
     if (preferredFormat === 'm3u8' && selectedServer.format === 'mpd') {
         selectedServer.data.url = selectedServer.data.url.replace('.mpd', '.m3u8');
         selectedServer.format = 'm3u8';
     }
-
-    let finalUrl = selectedServer.data.url;
 
     let englishSubtitles = null;
     try {
@@ -634,20 +610,9 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
 
     return {
         defaultUrl: selectedServer.data.url,
-        vFastUrl: vFastServer ? vFastServer.data.url : null,
         referer: baseUrl,
         format: selectedServer.format,
         isMaster: selectedServer.isMaster === true,
-        subtitles: englishSubtitles,
-        fullData: selectedServer.data,
-        vFastData: vFastServer ? vFastServer.data : null,
-        serverStats: {
-            total: serverList.length,
-            working: vFastServer ? 2 : 1,
-            failed: serverList.length - (vFastServer ? 2 : 1),
-            selectedServerIndex: selectedServer.index,
-            vFastServerIndex: vFastServer ? vFastServer.index : null
-        }
+        subtitles: englishSubtitles
     };
 }
-
