@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.1.0 (Vidfast + Videasy 4K)");
+    console.log("VidFast module v1.1.1 (Videasy 4K diagnostics)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -332,40 +332,67 @@ async function getVideasy4K(title, year, tmdbId, imdbId, mediaType, seasonNumber
     const probe = async (server) => {
         try {
             const fullUrl = `https://api.videasy.to/${server.endpoint}/sources-with-title?title=${encodedTitle}&mediaType=${mediaType}&year=${year}&episodeId=${episode}&seasonId=${season}&tmdbId=${tmdbId}&imdbId=${imdbId}`;
+            console.log(`Videasy ${server.name}: requesting ${fullUrl}`);
             const resp = await soraFetch(fullUrl, fetchOpts);
-            if (!resp) return null;
+            if (!resp) {
+                console.log(`Videasy ${server.name}: no response object`);
+                return null;
+            }
+            if (typeof resp.status !== 'undefined') {
+                console.log(`Videasy ${server.name}: HTTP status ${resp.status}`);
+            }
 
             const encrypted = await resp.text();
-            if (!encrypted || encrypted.includes("Attention Required") || encrypted.includes("Cloudflare")) return null;
+            if (!encrypted) {
+                console.log(`Videasy ${server.name}: empty body`);
+                return null;
+            }
+            if (encrypted.includes("Attention Required") || encrypted.includes("Cloudflare")) {
+                console.log(`Videasy ${server.name}: BLOCKED by Cloudflare`);
+                return null;
+            }
+            console.log(`Videasy ${server.name}: got encrypted body (${encrypted.length} chars): ${encrypted.slice(0, 120)}`);
 
             const decResp = await soraFetch("https://enc-dec.app/api/dec-videasy", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Accept": "application/json" },
                 body: JSON.stringify({ text: encrypted.trim(), id: String(tmdbId) })
             });
-            if (!decResp) return null;
-
-            let decData = null;
-            try {
-                const decText = await decResp.text();
-                decData = JSON.parse(decText);
-            } catch (e) {
-                console.log(`Videasy ${server.name}: decrypt parse failed: ${e}`);
+            if (!decResp) {
+                console.log(`Videasy ${server.name}: no decrypt response`);
                 return null;
             }
 
-            if (!decData || decData.status !== 200 || !decData.result) return null;
+            let decData = null;
+            let decText = "";
+            try {
+                decText = await decResp.text();
+                decData = JSON.parse(decText);
+            } catch (e) {
+                console.log(`Videasy ${server.name}: decrypt parse failed: ${e} | raw: ${decText.slice(0, 200)}`);
+                return null;
+            }
+
+            if (!decData || decData.status !== 200 || !decData.result) {
+                console.log(`Videasy ${server.name}: decrypt bad status/result: ${JSON.stringify(decData).slice(0, 200)}`);
+                return null;
+            }
 
             const sources = decData.result.sources || [];
+            // Log every quality label so we can see what Videasy actually returned.
+            const qualities = sources.map(s => s.quality);
+            console.log(`Videasy ${server.name}: ${sources.length} sources, qualities: ${JSON.stringify(qualities)}`);
+
             const fourK = sources.find(s => {
                 const q = (s.quality || "").toString().toLowerCase();
                 return q.includes("2160") || q.includes("4k");
             });
 
             if (fourK && fourK.url) {
-                console.log(`Videasy ${server.name}: 4K found`);
+                console.log(`Videasy ${server.name}: 4K found (${fourK.quality})`);
                 return { url: fourK.url, headers: streamHeaders, server: server.name };
             }
+            console.log(`Videasy ${server.name}: no 2160/4K in sources`);
             return null;
         } catch (err) {
             console.log(`Videasy ${server.name} error: ${err}`);
