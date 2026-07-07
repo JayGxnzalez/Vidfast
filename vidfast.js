@@ -181,7 +181,7 @@ async function extractEpisodes(url) {
 }
 
 async function extractStreamUrl(ID) {
-    console.log("VidFast module v1.1.1 (Videasy 4K diagnostics)");
+    console.log("VidFast module v1.2.0 (Vidfast only, .vc domain)");
     const startTime = Date.now();
 
     if (ID.includes('movie')) {
@@ -201,17 +201,12 @@ async function extractStreamUrl(ID) {
         const streamResponse = await ilovefeet(imdbID, false, null, null, 'm3u8');
 
         const streamHeaders = {
-            "Referer": "https://vidfast.pro/",
-            "Origin": "https://vidfast.pro",
+            "Referer": "https://vidfast.vc/",
+            "Origin": "https://vidfast.vc",
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
         };
 
         const streams = [];
-
-        const videasy4K = await getVideasy4K(tmdbData.title || tmdbData.name || "", (tmdbData.release_date ? new Date(tmdbData.release_date).getFullYear() : ""), tmdbID, imdbID, "movie", null, null).catch(e => { console.log('Videasy 4K failed: ' + e); return null; });
-        if (videasy4K && videasy4K.url) {
-            streams.push({ title: "4K", streamUrl: videasy4K.url, headers: videasy4K.headers });
-        }
 
         // Main option: "Auto" when it's a master (player adapts across variants),
         // otherwise generic "1080p" for a single-rendition media playlist.
@@ -252,17 +247,12 @@ async function extractStreamUrl(ID) {
         const streamResponse = await ilovefeet(imdbID, true, seasonNumber, episodeNumber, 'm3u8');
 
         const streamHeaders = {
-            "Referer": "https://vidfast.pro/",
-            "Origin": "https://vidfast.pro",
+            "Referer": "https://vidfast.vc/",
+            "Origin": "https://vidfast.vc",
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
         };
 
         const streams = [];
-
-        const videasy4K = await getVideasy4K(tmdbData.name || tmdbData.title || "", (tmdbData.first_air_date ? new Date(tmdbData.first_air_date).getFullYear() : ""), tmdbID, imdbID, "tv", seasonNumber, episodeNumber).catch(e => { console.log('Videasy 4K failed: ' + e); return null; });
-        if (videasy4K && videasy4K.url) {
-            streams.push({ title: "4K", streamUrl: videasy4K.url, headers: videasy4K.headers });
-        }
 
         // Main option: "Auto" when it's a master (player adapts across variants),
         // otherwise generic "1080p" for a single-rendition media playlist.
@@ -304,118 +294,12 @@ async function soraFetch(url, options = { headers: {}, method: 'GET', body: null
     }
 }
 
-async function getVideasy4K(title, year, tmdbId, imdbId, mediaType, seasonNumber, episodeNumber) {
-    const encodedTitle = encodeURIComponent(title || "");
-    const season = seasonNumber || "1";
-    const episode = episodeNumber || "1";
-
-    // tejo first so its master playlist wins when both return 4K.
-    const servers = [
-        { name: "Tejo", endpoint: "tejo" },
-        { name: "Yoru", endpoint: "cdn" }
-    ];
-
-    const fetchOpts = {
-        headers: {
-            "Referer": "https://player.videasy.to/",
-            "Origin": "https://player.videasy.to",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        }
-    };
-
-    const streamHeaders = {
-        "Origin": "https://player.videasy.to",
-        "Referer": "https://player.videasy.to/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    };
-
-    const probe = async (server) => {
-        try {
-            const fullUrl = `https://api.videasy.to/${server.endpoint}/sources-with-title?title=${encodedTitle}&mediaType=${mediaType}&year=${year}&episodeId=${episode}&seasonId=${season}&tmdbId=${tmdbId}&imdbId=${imdbId}`;
-            console.log(`Videasy ${server.name}: requesting ${fullUrl}`);
-            const resp = await soraFetch(fullUrl, fetchOpts);
-            if (!resp) {
-                console.log(`Videasy ${server.name}: no response object`);
-                return null;
-            }
-            if (typeof resp.status !== 'undefined') {
-                console.log(`Videasy ${server.name}: HTTP status ${resp.status}`);
-            }
-
-            const encrypted = await resp.text();
-            if (!encrypted) {
-                console.log(`Videasy ${server.name}: empty body`);
-                return null;
-            }
-            if (encrypted.includes("Attention Required") || encrypted.includes("Cloudflare")) {
-                console.log(`Videasy ${server.name}: BLOCKED by Cloudflare`);
-                return null;
-            }
-            console.log(`Videasy ${server.name}: got encrypted body (${encrypted.length} chars): ${encrypted.slice(0, 120)}`);
-
-            const decResp = await soraFetch("https://enc-dec.app/api/dec-videasy", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Accept": "application/json" },
-                body: JSON.stringify({ text: encrypted.trim(), id: String(tmdbId) })
-            });
-            if (!decResp) {
-                console.log(`Videasy ${server.name}: no decrypt response`);
-                return null;
-            }
-
-            let decData = null;
-            let decText = "";
-            try {
-                decText = await decResp.text();
-                decData = JSON.parse(decText);
-            } catch (e) {
-                console.log(`Videasy ${server.name}: decrypt parse failed: ${e} | raw: ${decText.slice(0, 200)}`);
-                return null;
-            }
-
-            if (!decData || decData.status !== 200 || !decData.result) {
-                console.log(`Videasy ${server.name}: decrypt bad status/result: ${JSON.stringify(decData).slice(0, 200)}`);
-                return null;
-            }
-
-            const sources = decData.result.sources || [];
-            // Log every quality label so we can see what Videasy actually returned.
-            const qualities = sources.map(s => s.quality);
-            console.log(`Videasy ${server.name}: ${sources.length} sources, qualities: ${JSON.stringify(qualities)}`);
-
-            const fourK = sources.find(s => {
-                const q = (s.quality || "").toString().toLowerCase();
-                return q.includes("2160") || q.includes("4k");
-            });
-
-            if (fourK && fourK.url) {
-                console.log(`Videasy ${server.name}: 4K found (${fourK.quality})`);
-                return { url: fourK.url, headers: streamHeaders, server: server.name };
-            }
-            console.log(`Videasy ${server.name}: no 2160/4K in sources`);
-            return null;
-        } catch (err) {
-            console.log(`Videasy ${server.name} error: ${err}`);
-            return null;
-        }
-    };
-
-    const results = await Promise.all(servers.map(s => probe(s)));
-    const chosen = results[0] || results[1];
-    if (chosen) {
-        console.log(`Videasy 4K selected from ${chosen.server}`);
-        return chosen;
-    }
-    console.log('Videasy: no 4K available');
-    return null;
-}
-
 async function ilovefeet(imdbId, isSeries = false, season = null, episode = null, preferredFormat = null) {
     let baseUrl;
     if (isSeries) {
-        baseUrl = `https://vidfast.pro/tv/${imdbId}/${season}/${episode}`;
+        baseUrl = `https://vidfast.vc/tv/${imdbId}/${season}/${episode}`;
     } else {
-        baseUrl = `https://vidfast.pro/movie/${imdbId}`;
+        baseUrl = `https://vidfast.vc/movie/${imdbId}`;
     }
 
     const headers = {
@@ -485,8 +369,14 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
         try {
             console.log(`Requesting Stream URL for server ${index}: ${apiStream}`);
             const streamResponse = await soraFetch(apiStream, { method: 'POST', headers: headers });
+            if (!streamResponse) {
+                throw new Error(`Server ${index} no response`);
+            }
 
             const streamEncrypted = await streamResponse.text();
+            if (!streamEncrypted || streamEncrypted.includes("Attention Required") || streamEncrypted.includes("Cloudflare")) {
+                throw new Error(`Server ${index} empty or Cloudflare-blocked`);
+            }
 
             const decStreamResponse = await soraFetch('https://enc-dec.app/api/dec-vidfast', {
                 method: 'POST',
@@ -528,8 +418,8 @@ async function ilovefeet(imdbId, isSeries = false, season = null, episode = null
                     const plResp = await soraFetch(data.url, {
                         method: 'GET',
                         headers: {
-                            "Referer": "https://vidfast.pro/",
-                            "Origin": "https://vidfast.pro",
+                            "Referer": "https://vidfast.vc/",
+                            "Origin": "https://vidfast.vc",
                             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
                         }
                     });
